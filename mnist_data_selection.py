@@ -12,8 +12,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 import time
+import json
+import os
 
-from model import (DataSelectionHyperOptModel, LabelBasedDataSelectionModel, 
+from model import (LabelBasedDataSelectionModel, 
                    FeatureMlpDataSelectionModel, CnnFeatureDataSelectionModel)
 from hyper_opt import NeumannHyperOptimizer, FixedPointHyperOptimizer
 from network import SimpleModel
@@ -25,7 +27,7 @@ def get_args():
     
     # 模型选择参数
     parser.add_argument('--selector', type=str, default='label_based',
-                        choices=['original', 'label_based', 'feature_mlp', 'cnn_feature'],
+                        choices=['label_based', 'feature_mlp', 'cnn_feature'],
                         help='选择数据选择模型类型')
     
     # 训练参数
@@ -33,15 +35,13 @@ def get_args():
                         help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='批次大小')
-    parser.add_argument('--fast_mode', action='store_true',
-                        help='使用快速训练模式')
     parser.add_argument('--val_subset_size', type=int, default=2000,
-                        help='快速模式下的验证集子集大小')
+                        help='验证集子集大小')
     parser.add_argument('--hyper_opt_freq', type=int, default=10,
-                        help='快速模式下的超参数优化频率')
+                        help='超参数优化频率')
     
     # 分析参数
-    parser.add_argument('--top_k', type=int, default=100,
+    parser.add_argument('--top_k', type=int, default=1000,
                         help='分析top-k重要样本')
     parser.add_argument('--vis_samples', type=int, default=20,
                         help='可视化样本数量')
@@ -58,14 +58,6 @@ def get_args():
 def print_model_info(model_type):
     """打印模型类型信息"""
     model_info = {
-        'original': {
-            'name': '原始每样本权重模型',
-            'params': '60,000个',
-            'pros': '最精细控制',
-            'cons': '参数过多，难优化，易过拟合',
-            'speed': '⭐',
-            'recommend': '❌'
-        },
         'label_based': {
             'name': '基于标签的模型',
             'params': '10个',
@@ -125,13 +117,7 @@ def print_training_stats(selector, model_type):
 
 def print_initial_weights(selector, model_type):
     """打印初始权重统计"""
-    if model_type == 'original':
-        initial_weights = selector.model.get_sample_weights().detach().cpu().numpy()
-        print(f"\n📈 初始样本权重统计:")
-        print(f"   平均权重: {initial_weights.mean():.6f}")
-        print(f"   权重标准差: {initial_weights.std():.6f}")
-        print(f"   权重范围: [{initial_weights.min():.6f}, {initial_weights.max():.6f}]")
-    elif model_type == 'label_based':
+    if model_type == 'label_based':
         initial_class_weights = selector.model.get_class_weights().detach().cpu().numpy()
         print(f"\n📈 初始类别权重统计:")
         for i, weight in enumerate(initial_class_weights):
@@ -148,36 +134,19 @@ def print_initial_weights(selector, model_type):
         print(f"   参数标准差: {all_params.std():.6f}")
 
 
-def train_model(selector, args):
-    """训练模型"""
-    print(f"\n⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # 选择训练模式
-    if args.fast_mode:
-        print(f"🚀 使用快速训练模式")
-        train_losses, val_losses = selector.train_fast(
-            num_epochs=args.epochs,
-            val_subset_size=args.val_subset_size,
-            hyper_opt_freq=args.hyper_opt_freq
-        )
-    else:
-        print(f"🎯 使用完整训练模式")
-        train_losses, val_losses = selector.train(num_epochs=args.epochs)
-    
-    return train_losses, val_losses
-
-
 def analyze_and_visualize(selector, args):
     """分析样本重要性并可视化"""
     print(f"\n📊 分析样本重要性...")
-    top_indices, top_weights = selector.analyze_sample_importance(top_k=args.top_k)
+    top_indices, top_weights, weights_stats, digit_distribution = selector.analyze_sample_importance(
+        top_k=args.top_k
+    )
     
     print(f"\n🎨 生成可视化结果...")
     # 为可视化准备权重数组
     all_weights = prepare_weights_for_visualization(selector, args.selector)
     selector.visualize_results(top_indices, all_weights, num_samples=args.vis_samples)
     
-    return all_weights
+    return all_weights, weights_stats, digit_distribution
 
 
 def prepare_weights_for_visualization(selector, model_type):
@@ -191,9 +160,6 @@ def prepare_weights_for_visualization(selector, model_type):
             _, label = dataset[train_idx]
             all_weights.append(class_weights[label])
         return np.array(all_weights)
-    
-    elif model_type == 'original':
-        return selector.model.get_sample_weights().detach().cpu().numpy()
     
     else:  # feature_mlp 或 cnn_feature
         all_weights = []
@@ -221,29 +187,192 @@ def prepare_weights_for_visualization(selector, model_type):
         return np.array(all_weights)
 
 
+def save_visualizations(selector, train_losses, val_losses, all_weights, 
+                       weights_stats, digit_distribution, args):
+    """Save all visualization plots to output folder"""
+    # Create output directory
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Set font for better compatibility
+    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    
+    print(f"💾 Saving visualization results to {output_dir} folder...")
+    
+    # 1. Training loss curves
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses, label='Training Loss', linewidth=2, color='blue')
+    plt.plot(val_losses, label=f'Validation Loss (Digit {args.target_digit})', linewidth=2, color='red')
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title(f'MNIST Data Selection Training Process ({args.selector})', fontsize=14)
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'training_loss_{args.selector}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 2. Sample weight distribution
+    plt.figure(figsize=(10, 6))
+    plt.hist(all_weights, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+    plt.xlabel('Sample Weight', fontsize=12)
+    plt.ylabel('Frequency', fontsize=12)
+    plt.title(f'Sample Weight Distribution ({args.selector})', fontsize=14)
+    plt.axvline(all_weights.mean(), color='red', linestyle='--', 
+                label=f'Mean: {all_weights.mean():.4f}')
+    plt.axvline(all_weights.mean() + all_weights.std(), color='orange', linestyle='--', 
+                label=f'μ+σ: {all_weights.mean() + all_weights.std():.4f}')
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'weight_distribution_{args.selector}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 3. Weight statistics by digit class
+    if args.selector == 'label_based':
+        class_weights = selector.model.get_class_weights().detach().cpu().numpy()
+        
+        plt.figure(figsize=(12, 6))
+        bars = plt.bar(range(10), class_weights, color='lightcoral', alpha=0.8, edgecolor='black')
+        plt.xlabel('Digit Class', fontsize=12)
+        plt.ylabel('Class Weight', fontsize=12)
+        plt.title(f'Weight by Digit Class (Target: Digit {args.target_digit})', fontsize=14)
+        plt.xticks(range(10))
+        
+        # Highlight target digit
+        bars[args.target_digit].set_color('gold')
+        bars[args.target_digit].set_edgecolor('red')
+        bars[args.target_digit].set_linewidth(3)
+        
+        # Add value labels
+        for i, weight in enumerate(class_weights):
+            plt.text(i, weight + 0.01, f'{weight:.3f}', ha='center', va='bottom', fontsize=10)
+        
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'weights_by_digit_{args.selector}.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    # 4. Top samples distribution statistics
+    plt.figure(figsize=(12, 8))
+    
+    # Prepare data
+    digits = list(range(10))
+    counts = [digit_distribution.get(d, 0) for d in digits]
+    percentages = [c / args.top_k * 100 for c in counts]
+    
+    # Create bar chart
+    colors = ['gold' if d == args.target_digit else 'lightblue' for d in digits]
+    bars = plt.bar(digits, percentages, color=colors, alpha=0.8, edgecolor='black')
+    
+    plt.xlabel('Digit Class', fontsize=12)
+    plt.ylabel('Percentage in Top Samples (%)', fontsize=12)
+    plt.title(f'Top {args.top_k} Important Samples Distribution\n(Most Helpful Samples for Digit {args.target_digit} Recognition)', fontsize=14)
+    plt.xticks(digits)
+    
+    # Add value labels
+    for i, (count, pct) in enumerate(zip(counts, percentages)):
+        if count > 0:
+            plt.text(i, pct + 1, f'{count}\n({pct:.1f}%)', ha='center', va='bottom', fontsize=10)
+    
+    # Add baseline (random distribution should be 10%)
+    plt.axhline(y=10, color='red', linestyle='--', alpha=0.7, 
+                label='Random Distribution Baseline (10%)')
+    
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, max(percentages) * 1.2)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'top_samples_distribution_{args.selector}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # 5. Generate summary statistics plot
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Subplot 1: Training curves
+    ax1.plot(train_losses, label='Training Loss', linewidth=2, color='blue')
+    ax1.plot(val_losses, label='Validation Loss', linewidth=2, color='red')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training Process')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Subplot 2: Weight distribution
+    ax2.hist(all_weights, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+    ax2.axvline(all_weights.mean(), color='red', linestyle='--', alpha=0.8)
+    ax2.set_xlabel('Sample Weight')
+    ax2.set_ylabel('Frequency')
+    ax2.set_title('Sample Weight Distribution')
+    ax2.grid(True, alpha=0.3)
+    
+    # Subplot 3: Class weights (if label_based) or weight statistics
+    if args.selector == 'label_based':
+        ax3.bar(range(10), class_weights, color='lightcoral', alpha=0.8)
+        ax3.set_xlabel('Digit Class')
+        ax3.set_ylabel('Class Weight')
+        ax3.set_title('Weight by Digit Class')
+        ax3.set_xticks(range(10))
+    else:
+        # Show weight statistics
+        stats_text = f"""Weight Statistics:
+        Min: {weights_stats['min_weight']:.4f}
+        Max: {weights_stats['max_weight']:.4f}
+        Mean: {weights_stats['mean_weight']:.4f}
+        Std: {weights_stats['std_weight']:.4f}
+        High Weight Samples: {weights_stats['high_weight_count']}
+        Low Weight Samples: {weights_stats['low_weight_count']}"""
+        ax3.text(0.1, 0.5, stats_text, transform=ax3.transAxes, fontsize=10,
+                verticalalignment='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax3.set_title('Weight Statistics')
+        ax3.axis('off')
+    
+    # Subplot 4: Top samples distribution
+    ax4.bar(digits, percentages, color=colors, alpha=0.8)
+    ax4.axhline(y=10, color='red', linestyle='--', alpha=0.7)
+    ax4.set_xlabel('Digit Class')
+    ax4.set_ylabel('Percentage (%)')
+    ax4.set_title(f'Top {args.top_k} Samples Distribution')
+    ax4.set_xticks(digits)
+    
+    plt.suptitle(f'MNIST Data Selection Analysis Results ({args.selector}, Target: Digit {args.target_digit})', fontsize=16)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'analysis_summary_{args.selector}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✅ Saved 5 visualization plots to {output_dir} folder:")
+    print(f"   📈 training_loss_{args.selector}.png")
+    print(f"   📊 weight_distribution_{args.selector}.png") 
+    if args.selector == 'label_based':
+        print(f"   🔢 weights_by_digit_{args.selector}.png")
+    print(f"   🏆 top_samples_distribution_{args.selector}.png")
+    print(f"   📋 analysis_summary_{args.selector}.png")
+
+
 def plot_results(train_losses, val_losses, all_weights):
-    """绘制训练结果"""
+    """Plot training results (display functionality)"""
     plt.figure(figsize=(12, 5))
     
     plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='训练损失')
-    plt.plot(val_losses, label='验证损失 (数字7)')
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_losses, label='Validation Loss (Digit 7)')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('训练过程')
+    plt.title('Training Process')
     plt.legend()
     
     plt.subplot(1, 2, 2)
     plt.hist(all_weights, bins=50, alpha=0.7)
-    plt.xlabel('样本权重')
-    plt.ylabel('频数')
-    plt.title('样本权重分布')
+    plt.xlabel('Sample Weight')
+    plt.ylabel('Frequency')
+    plt.title('Sample Weight Distribution')
     
     plt.tight_layout()
     plt.show()
 
 
-def print_performance_summary(start_time, train_losses, val_losses, selector):
+def print_performance_summary(start_time, train_losses, val_losses):
     """打印性能总结"""
     end_time = time.time()
     training_time = end_time - start_time
@@ -252,17 +381,6 @@ def print_performance_summary(start_time, train_losses, val_losses, selector):
     print(f"⏱️  总训练时间: {training_time:.1f} 秒 ({training_time/60:.1f} 分钟)")
     print(f"📉 最终训练损失: {train_losses[-1]:.4f}")
     print(f"📊 最终验证损失: {val_losses[-1]:.4f}")
-    
-    # 性能分析总结
-    if hasattr(selector, 'timing_stats') and selector.timing_stats['total']:
-        avg_batch_time = np.mean(selector.timing_stats['total'])
-        avg_val_time = np.mean(selector.timing_stats['val'])
-        avg_hyper_time = np.mean(selector.timing_stats['hyper'])
-        
-        print(f"\n📈 性能分析总结:")
-        print(f"   平均每batch时间: {avg_batch_time:.2f}s")
-        print(f"   验证损失计算: {avg_val_time:.2f}s ({avg_val_time/avg_batch_time*100:.1f}%)")
-        print(f"   超参数优化: {avg_hyper_time:.2f}s ({avg_hyper_time/avg_batch_time*100:.1f}%)")
 
 
 class IndexedDataset(Dataset):
@@ -349,14 +467,7 @@ class MNISTDataSelector:
     
     def _create_selection_model(self, num_train_samples):
         """根据模型类型创建相应的数据选择模型"""
-        if self.model_type == 'original':
-            # 原始的每样本权重模型
-            return DataSelectionHyperOptModel(
-                self.network, 
-                self.criterion, 
-                num_train_samples
-            )
-        elif self.model_type == 'label_based':
+        if self.model_type == 'label_based':
             # 基于标签的简化模型（推荐）
             return LabelBasedDataSelectionModel(
                 self.network, 
@@ -380,279 +491,7 @@ class MNISTDataSelector:
             )
         else:
             raise ValueError(f"Unsupported model_type: {self.model_type}. "
-                           f"Choose from: 'original', 'label_based', 'feature_mlp', 'cnn_feature'")
-    
-    def train_step(self, train_data, train_targets, train_batch_indices):
-        """执行一步训练"""
-        import time
-        
-        step_start = time.time()
-        
-        # 定义训练损失函数
-        def train_loss_func():
-            # 重新计算训练损失（用于随机模式）
-            train_loss, train_logit = self.model.train_loss(
-                train_data, train_targets, train_batch_indices
-            )
-            return train_loss, train_logit
-        
-        # 计算验证损失 (这通常是最慢的部分)
-        val_start = time.time()
-        val_loss = self._compute_validation_loss()
-        val_time = time.time() - val_start
-        
-        # 超参数优化步骤
-        hyper_start = time.time()
-        self.hyper_optimizer.step(train_loss_func, val_loss)
-        hyper_time = time.time() - hyper_start
-        
-        # 模型参数优化步骤
-        model_start = time.time()
-        self.model_optimizer.zero_grad()
-        train_loss, _ = train_loss_func()
-        train_loss.backward()
-        self.model_optimizer.step()
-        model_time = time.time() - model_start
-        
-        total_time = time.time() - step_start
-        
-        # 存储时间统计用于分析
-        if not hasattr(self, 'timing_stats'):
-            self.timing_stats = {'val': [], 'hyper': [], 'model': [], 'total': []}
-        
-        self.timing_stats['val'].append(val_time)
-        self.timing_stats['hyper'].append(hyper_time)
-        self.timing_stats['model'].append(model_time)
-        self.timing_stats['total'].append(total_time)
-        
-        return train_loss.item(), val_loss.item(), {
-            'val_time': val_time,
-            'hyper_time': hyper_time, 
-            'model_time': model_time,
-            'total_time': total_time
-        }
-    
-    def _compute_validation_loss(self):
-        """计算验证损失"""
-        total_loss = 0
-        total_samples = 0
-        
-        # 不使用no_grad()，因为我们需要计算验证损失的梯度
-        for val_data, val_targets in self.val_loader:
-            val_data, val_targets = val_data.to(self.device), val_targets.to(self.device)
-            val_loss = self.model.validation_loss(val_data, val_targets)
-            total_loss += val_loss * val_data.size(0)  # 直接使用tensor，不转换为item
-            total_samples += val_data.size(0)
-        
-        return total_loss / total_samples
-    
-    def train(self, num_epochs=50):
-        """训练数据选择模型"""
-        train_losses = []
-        val_losses = []
-        
-        print("开始训练数据选择模型...")
-        print("=" * 80)
-        
-        for epoch in range(num_epochs):
-            epoch_train_loss = 0
-            epoch_val_loss = 0
-            num_batches = 0
-            
-            # 每个epoch开始时显示权重统计
-            if epoch % 5 == 0:
-                if self.model_type == 'original':
-                    weights = self.model.get_sample_weights().detach().cpu().numpy()
-                    print(f"\nEpoch {epoch} - 样本权重统计:")
-                    print(f"  最大权重: {weights.max():.6f}")
-                    print(f"  最小权重: {weights.min():.6f}")
-                    print(f"  平均权重: {weights.mean():.6f}")
-                    print(f"  权重标准差: {weights.std():.6f}")
-                    print(f"  高权重样本数 (>avg): {(weights > weights.mean()).sum()}")
-                elif self.model_type == 'label_based':
-                    class_weights = self.model.get_class_weights().detach().cpu().numpy()
-                    print(f"\nEpoch {epoch} - 类别权重统计:")
-                    for i, weight in enumerate(class_weights):
-                        print(f"  数字 {i}: {weight:.6f}")
-                    print(f"  最大类别权重: {class_weights.max():.6f}")
-                    print(f"  最小类别权重: {class_weights.min():.6f}")
-                else:
-                    print(f"\nEpoch {epoch} - 权重网络参数统计:")
-                    total_params = sum(p.numel() for p in self.model.hyper_parameters)
-                    print(f"  超参数数量: {total_params}")
-                    # 显示权重网络的参数范围
-                    all_params = torch.cat([p.flatten() for p in self.model.hyper_parameters])
-                    print(f"  参数范围: [{all_params.min():.6f}, {all_params.max():.6f}]")
-            
-            for batch_idx, (train_data, train_targets, train_batch_indices) in enumerate(self.train_loader):
-                train_data, train_targets = train_data.to(self.device), train_targets.to(self.device)
-                # train_batch_indices 已经从 IndexedDataset 中获得
-                
-                # 执行训练步骤
-                train_loss, val_loss, timing = self.train_step(
-                    train_data, train_targets, train_batch_indices
-                )
-                
-                epoch_train_loss += train_loss
-                epoch_val_loss += val_loss
-                num_batches += 1
-                
-                # 每20个batch打印一次进度
-                if batch_idx % 20 == 0:
-                    if self.model_type == 'original':
-                        current_weights = self.model.get_sample_weights()[train_batch_indices].detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {current_weights.mean():.4f}±{current_weights.std():.4f}"
-                    elif self.model_type == 'label_based':
-                        batch_weights = self.model.get_sample_weights_by_labels(train_targets).detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
-                    else:
-                        # feature_mlp or cnn_feature: 实时计算权重
-                        with torch.no_grad():
-                            batch_weights = self.model.get_sample_weights(train_data).detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
-                    
-                    print(f"  Epoch {epoch:2d}, Batch {batch_idx:3d}/{len(self.train_loader):3d} | "
-                          f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | {weight_info}")
-                    print(f"    ⏱️  时间分析: 验证损失 {timing['val_time']:.2f}s, "
-                          f"超参数优化 {timing['hyper_time']:.2f}s, "
-                          f"模型优化 {timing['model_time']:.2f}s, "
-                          f"总计 {timing['total_time']:.2f}s")
-            
-            avg_train_loss = epoch_train_loss / num_batches
-            avg_val_loss = epoch_val_loss / num_batches
-            
-            train_losses.append(avg_train_loss)
-            val_losses.append(avg_val_loss)
-            
-            # 每个epoch结束时打印总结
-            print(f"\n>>> Epoch {epoch:2d} 完成 | "
-                  f"平均训练损失: {avg_train_loss:.4f}, 平均验证损失: {avg_val_loss:.4f}")
-            
-            # 显示损失变化趋势
-            if epoch > 0:
-                train_change = avg_train_loss - train_losses[-2]
-                val_change = avg_val_loss - val_losses[-2]
-                train_trend = "↓" if train_change < 0 else "↑" if train_change > 0 else "="
-                val_trend = "↓" if val_change < 0 else "↑" if val_change > 0 else "="
-                print(f"    损失变化: 训练 {train_trend} {train_change:+.4f}, 验证 {val_trend} {val_change:+.4f}")
-            
-            # 显示这个epoch的平均时间统计
-            if hasattr(self, 'timing_stats'):
-                import numpy as np
-                recent_stats = {}
-                for key in self.timing_stats:
-                    recent_stats[key] = np.mean(self.timing_stats[key][-num_batches:])
-                
-                print(f"    ⏱️  平均时间分析: 验证损失 {recent_stats['val']:.2f}s ({recent_stats['val']/recent_stats['total']*100:.1f}%), "
-                      f"超参数优化 {recent_stats['hyper']:.2f}s ({recent_stats['hyper']/recent_stats['total']*100:.1f}%), "
-                      f"模型优化 {recent_stats['model']:.2f}s ({recent_stats['model']/recent_stats['total']*100:.1f}%)")
-                print(f"    📊 每batch平均时间: {recent_stats['total']:.2f}s, 预计完成时间: {recent_stats['total'] * len(self.train_loader) * (num_epochs - epoch - 1) / 60:.1f} 分钟")
-            
-            print("-" * 80)
-        
-        return train_losses, val_losses
-    
-    def train_fast(self, num_epochs=10, val_subset_size=1000, hyper_opt_freq=5):
-        """快速训练版本 - 优化性能"""
-        print("🚀 使用快速训练模式 (性能优化版本)")
-        print(f"   - 验证集子集大小: {val_subset_size}")
-        print(f"   - 超参数优化频率: 每 {hyper_opt_freq} 个batch")
-        
-        # 创建验证集子集
-        val_subset_indices = torch.randperm(len(self.val_loader.dataset))[:val_subset_size]
-        
-        train_losses = []
-        val_losses = []
-        
-        print("=" * 80)
-        
-        for epoch in range(num_epochs):
-            epoch_train_loss = 0
-            epoch_val_loss = 0
-            num_batches = 0
-            
-            # 每个epoch开始时显示权重统计
-            if epoch % 5 == 0:
-                if self.model_type == 'original':
-                    weights = self.model.get_sample_weights().detach().cpu().numpy()
-                    print(f"\nEpoch {epoch} - 样本权重统计:")
-                    print(f"  最大权重: {weights.max():.6f}")
-                    print(f"  最小权重: {weights.min():.6f}")
-                    print(f"  平均权重: {weights.mean():.6f}")
-                    print(f"  权重标准差: {weights.std():.6f}")
-                    print(f"  高权重样本数 (>avg): {(weights > weights.mean()).sum()}")
-                elif self.model_type == 'label_based':
-                    class_weights = self.model.get_class_weights().detach().cpu().numpy()
-                    print(f"\nEpoch {epoch} - 类别权重统计:")
-                    for i, weight in enumerate(class_weights):
-                        print(f"  数字 {i}: {weight:.6f}")
-                    print(f"  最大类别权重: {class_weights.max():.6f}")
-                    print(f"  最小类别权重: {class_weights.min():.6f}")
-                else:
-                    print(f"\nEpoch {epoch} - 权重网络参数统计:")
-                    total_params = sum(p.numel() for p in self.model.hyper_parameters)
-                    print(f"  超参数数量: {total_params}")
-                    # 显示权重网络的参数范围
-                    all_params = torch.cat([p.flatten() for p in self.model.hyper_parameters])
-                    print(f"  参数范围: [{all_params.min():.6f}, {all_params.max():.6f}]")
-            
-            for batch_idx, (train_data, train_targets, train_batch_indices) in enumerate(self.train_loader):
-                train_data, train_targets = train_data.to(self.device), train_targets.to(self.device)
-                
-                # 只在指定频率下进行超参数优化
-                if batch_idx % hyper_opt_freq == 0:
-                    train_loss, val_loss, timing = self.train_step_fast(
-                        train_data, train_targets, train_batch_indices, val_subset_indices
-                    )
-                else:
-                    # 只进行模型参数优化
-                    train_loss, val_loss, timing = self.train_step_model_only(
-                        train_data, train_targets, train_batch_indices
-                    )
-                
-                epoch_train_loss += train_loss
-                epoch_val_loss += val_loss
-                num_batches += 1
-                
-                # 每50个batch打印一次进度
-                if batch_idx % 50 == 0:
-                    if self.model_type == 'original':
-                        current_weights = self.model.get_sample_weights()[train_batch_indices].detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {current_weights.mean():.4f}±{current_weights.std():.4f}"
-                    elif self.model_type == 'label_based':
-                        batch_weights = self.model.get_sample_weights_by_labels(train_targets).detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
-                    else:
-                        # feature_mlp or cnn_feature: 实时计算权重
-                        with torch.no_grad():
-                            batch_weights = self.model.get_sample_weights(train_data).detach().cpu().numpy()
-                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
-                    
-                    print(f"  Epoch {epoch:2d}, Batch {batch_idx:3d}/{len(self.train_loader):3d} | "
-                          f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | {weight_info}")
-                    if timing:
-                        print(f"    ⏱️  时间: {timing['total_time']:.2f}s")
-            
-            avg_train_loss = epoch_train_loss / num_batches
-            avg_val_loss = epoch_val_loss / num_batches
-            
-            train_losses.append(avg_train_loss)
-            val_losses.append(avg_val_loss)
-            
-            # 每个epoch结束时打印总结
-            print(f"\n>>> Epoch {epoch:2d} 完成 | "
-                  f"平均训练损失: {avg_train_loss:.4f}, 平均验证损失: {avg_val_loss:.4f}")
-            
-            if epoch > 0:
-                train_change = avg_train_loss - train_losses[-2]
-                val_change = avg_val_loss - val_losses[-2]
-                train_trend = "↓" if train_change < 0 else "↑" if train_change > 0 else "="
-                val_trend = "↓" if val_change < 0 else "↑" if val_change > 0 else "="
-                print(f"    损失变化: 训练 {train_trend} {train_change:+.4f}, 验证 {val_trend} {val_change:+.4f}")
-            
-            print("-" * 80)
-        
-        return train_losses, val_losses
+                           f"Choose from: 'label_based', 'feature_mlp', 'cnn_feature'")
     
     def train_step_fast(self, train_data, train_targets, train_batch_indices, val_subset_indices):
         """快速训练步骤 - 使用验证集子集"""
@@ -734,14 +573,103 @@ class MNISTDataSelector:
         else:
             return torch.tensor(0.0, device=self.device)
     
+    def train_fast(self, num_epochs=10, val_subset_size=1000, hyper_opt_freq=5):
+        """快速训练版本 - 优化性能"""
+        print("🚀 使用快速训练模式 (性能优化版本)")
+        print(f"   - 验证集子集大小: {val_subset_size}")
+        print(f"   - 超参数优化频率: 每 {hyper_opt_freq} 个batch")
+        
+        # 创建验证集子集
+        val_subset_indices = torch.randperm(len(self.val_loader.dataset))[:val_subset_size]
+        
+        train_losses = []
+        val_losses = []
+        
+        print("=" * 80)
+        
+        for epoch in range(num_epochs):
+            epoch_train_loss = 0
+            epoch_val_loss = 0
+            num_batches = 0
+            
+            # 每个epoch开始时显示权重统计
+            if epoch % 5 == 0:
+                if self.model_type == 'label_based':
+                    class_weights = self.model.get_class_weights().detach().cpu().numpy()
+                    print(f"\nEpoch {epoch} - 类别权重统计:")
+                    for i, weight in enumerate(class_weights):
+                        print(f"  数字 {i}: {weight:.6f}")
+                    print(f"  最大类别权重: {class_weights.max():.6f}")
+                    print(f"  最小类别权重: {class_weights.min():.6f}")
+                else:
+                    print(f"\nEpoch {epoch} - 权重网络参数统计:")
+                    total_params = sum(p.numel() for p in self.model.hyper_parameters)
+                    print(f"  超参数数量: {total_params}")
+                    # 显示权重网络的参数范围
+                    all_params = torch.cat([p.flatten() for p in self.model.hyper_parameters])
+                    print(f"  参数范围: [{all_params.min():.6f}, {all_params.max():.6f}]")
+            
+            for batch_idx, (train_data, train_targets, train_batch_indices) in enumerate(self.train_loader):
+                train_data, train_targets = train_data.to(self.device), train_targets.to(self.device)
+                
+                # 只在指定频率下进行超参数优化
+                if batch_idx % hyper_opt_freq == 0:
+                    train_loss, val_loss, timing = self.train_step_fast(
+                        train_data, train_targets, train_batch_indices, val_subset_indices
+                    )
+                else:
+                    # 只进行模型参数优化
+                    train_loss, val_loss, timing = self.train_step_model_only(
+                        train_data, train_targets, train_batch_indices
+                    )
+                
+                epoch_train_loss += train_loss
+                epoch_val_loss += val_loss
+                num_batches += 1
+                
+                # 每50个batch打印一次进度
+                if batch_idx % 50 == 0:
+                    if self.model_type == 'label_based':
+                        batch_weights = self.model.get_sample_weights_by_labels(train_targets).detach().cpu().numpy()
+                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
+                    else:
+                        # feature_mlp or cnn_feature: 实时计算权重
+                        with torch.no_grad():
+                            batch_weights = self.model.get_sample_weights(train_data).detach().cpu().numpy()
+                        weight_info = f"当前batch权重: {batch_weights.mean():.4f}±{batch_weights.std():.4f}"
+                    
+                    print(f"  Epoch {epoch:2d}, Batch {batch_idx:3d}/{len(self.train_loader):3d} | "
+                          f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} | {weight_info}")
+                    if timing:
+                        print(f"    ⏱️  时间: {timing['total_time']:.2f}s")
+            
+            avg_train_loss = epoch_train_loss / num_batches
+            avg_val_loss = epoch_val_loss / num_batches
+            
+            train_losses.append(avg_train_loss)
+            val_losses.append(avg_val_loss)
+            
+            # 每个epoch结束时打印总结
+            print(f"\n>>> Epoch {epoch:2d} 完成 | "
+                  f"平均训练损失: {avg_train_loss:.4f}, 平均验证损失: {avg_val_loss:.4f}")
+            
+            # 显示损失变化趋势
+            if epoch > 0:
+                train_change = avg_train_loss - train_losses[-2]
+                val_change = avg_val_loss - val_losses[-2]
+                train_trend = "↓" if train_change < 0 else "↑" if train_change > 0 else "="
+                val_trend = "↓" if val_change < 0 else "↑" if val_change > 0 else "="
+                print(f"    损失变化: 训练 {train_trend} {train_change:+.4f}, 验证 {val_trend} {val_change:+.4f}")
+            
+            print("-" * 80)
+        
+        return train_losses, val_losses
+    
     def analyze_sample_importance(self, top_k=100):
         """分析样本重要性并返回最重要的样本"""
         
         # 根据模型类型获取权重
-        if self.model_type == 'original':
-            # 原始模型：每个样本有独立权重
-            weights = self.model.get_sample_weights().detach().cpu().numpy()
-        elif self.model_type == 'label_based':
+        if self.model_type == 'label_based':
             # 基于标签的模型：根据类别分配权重
             class_weights = self.model.get_class_weights().detach().cpu().numpy()
             print(f"📊 各数字类别权重:")
@@ -816,7 +744,34 @@ class MNISTDataSelector:
         print(f"   - Top 10 权重平均: {top_weights[:10].mean():.6f}")
         print(f"   - Top 50 权重平均: {top_weights[:50].mean():.6f}")
         
-        return top_indices, top_weights
+        # 分析数字分布
+        transform = transforms.Compose([transforms.ToTensor()])
+        dataset = datasets.MNIST('data', train=True, transform=transform)
+        digit_distribution = {}
+        
+        for i in range(min(top_k, len(top_indices))):
+            real_idx = self.train_indices[top_indices[i]]
+            _, label = dataset[real_idx]
+            label = int(label)
+            if label not in digit_distribution:
+                digit_distribution[label] = 0
+            digit_distribution[label] += 1
+        
+        # 创建权重统计信息
+        weights_stats = {
+            "min_weight": float(weights.min()),
+            "max_weight": float(weights.max()),
+            "mean_weight": float(weights.mean()),
+            "std_weight": float(weights.std()),
+            "high_weight_count": int(high_weight_count),
+            "low_weight_count": int(low_weight_count),
+            "total_samples": len(weights),
+            "top_weights_mean": float(top_weights.mean()),
+            "top_10_mean": float(top_weights[:min(10, len(top_weights))].mean()),
+            "top_50_mean": float(top_weights[:min(50, len(top_weights))].mean()) if len(top_weights) >= 50 else float(top_weights.mean())
+        }
+        
+        return top_indices, top_weights, weights_stats, digit_distribution
     
     def visualize_results(self, top_indices, weights, num_samples=20):
         """可视化最重要的样本"""
@@ -842,24 +797,13 @@ class MNISTDataSelector:
             percentage = (digit_counts[digit] / num_samples) * 100
             print(f"   数字 {digit}: {digit_counts[digit]:2d} 个样本 ({percentage:4.1f}%)")
         
-        fig, axes = plt.subplots(4, 5, figsize=(15, 12))
-        fig.suptitle(f'前{num_samples}个最重要的训练样本\n(基于数字7的验证损失优化)', fontsize=16)
-        
-        for i in range(min(num_samples, len(top_indices))):
-            row = i // 5
-            col = i % 5
-            
-            # 获取真实的数据集索引
-            real_idx = self.train_indices[top_indices[i]]
-            image, label = dataset[real_idx]
-            weight = sample_weights[top_indices[i]]
-            
-            axes[row, col].imshow(image.squeeze(), cmap='gray')
-            axes[row, col].set_title(f'数字: {label}\n权重: {weight:.4f}', fontsize=10)
-            axes[row, col].axis('off')
-        
-        plt.tight_layout()
-        plt.show()
+        # 简化的可视化 - 只显示数字分布统计
+        print(f"\n📊 最重要样本的数字分布统计:")
+        total_samples = sum(digit_counts.values())
+        for digit in range(10):
+            count = digit_counts.get(digit, 0)
+            if count > 0:
+                print(f"   数字 {digit}: {'█' * int(count * 20 / total_samples)} {count}/{total_samples}")
         
         return digit_counts
 
@@ -867,11 +811,12 @@ class MNISTDataSelector:
 def main():
     """主函数：演示MNIST数据选择"""
     
-    print("🎯 MNIST数据选择超参数优化")
+    print("🎯 MNIST数据选择超参数优化 (精简版)")
     print("=" * 60)
     print("📋 任务说明:")
     print("   - 从MNIST所有训练样本(0-9)中选择对数字7识别最有帮助的样本")
     print("   - 使用双层优化：外层学习样本权重，内层训练分类器")
+    print("   - 只使用快速训练模式")
     print("=" * 60)
     
     # 1. 解析参数和初始化
@@ -889,23 +834,27 @@ def main():
     )
     print_training_stats(selector, args.selector)
     
-    # 3. 训练模型
+    # 3. 训练模型 (只使用快速模式)
+    print(f"\n⏰ 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     start_time = time.time()
-    train_losses, val_losses = train_model(selector, args)
-    print_performance_summary(start_time, train_losses, val_losses, selector)
+    train_losses, val_losses = selector.train_fast(
+        num_epochs=args.epochs,
+        val_subset_size=args.val_subset_size,
+        hyper_opt_freq=args.hyper_opt_freq
+    )
+    
+    print_performance_summary(start_time, train_losses, val_losses)
     
     # 4. 分析和可视化
-    all_weights = analyze_and_visualize(selector, args)
+    all_weights, weights_stats, digit_distribution = analyze_and_visualize(selector, args)
     plot_results(train_losses, val_losses, all_weights)
     
-    # 5. 生成详细的图片分析
-    try:
-        from visualize_results import visualize_mnist_results
-        print("\n🖼️  正在生成详细的图片分析...")
-        visualize_mnist_results(selector, train_losses, val_losses, all_weights, 
-                               selector.analyze_sample_importance(top_k=args.top_k)[0])
-    except ImportError:
-        print("\n⚠️  可视化模块未找到，跳过详细分析")
+    # 5. 保存所有可视化结果
+    save_visualizations(selector, train_losses, val_losses, all_weights, 
+                       weights_stats, digit_distribution, args)
+    
+    print(f"\n🎉 实验完成！")
+    print(f"💡 从训练结果可以看出哪些数字类别对识别数字7最有帮助!")
 
 
 if __name__ == "__main__":
@@ -916,25 +865,21 @@ if __name__ == "__main__":
 📖 使用示例：
 
 1. 基本使用 (推荐的label_based模型):
-   python mnist_data_selection.py --selector label_based --epochs 10 --fast_mode --top_k 1000
+   python mnist_data_selection.py --selector label_based --epochs 10 --top_k 1000
 
 2. 使用特征MLP模型:
    python mnist_data_selection.py --selector feature_mlp --epochs 15
 
 3. 使用CNN特征模型:
-   python mnist_data_selection.py --selector cnn_feature --epochs 20 --fast_mode
+   python mnist_data_selection.py --selector cnn_feature --epochs 20
 
-4. 完整训练 (较慢):
-   python mnist_data_selection.py --selector label_based --epochs 30
-
-5. 自定义参数:
+4. 自定义参数:
    python mnist_data_selection.py --selector label_based --epochs 10 --batch_size 128 --top_k 200 --target_digit 9
 
 📊 性能建议:
-   - 初学者: 使用 --selector label_based --fast_mode
+   - 初学者: 使用 --selector label_based
    - 想要更精细控制: 使用 --selector feature_mlp
    - 追求最高性能: 使用 --selector cnn_feature (需要更多时间)
-   - 避免使用 --selector original (参数太多，训练困难)
 
 🎯 预期结果:
    - label_based: 会学习到哪些数字类别对识别数字7最有帮助

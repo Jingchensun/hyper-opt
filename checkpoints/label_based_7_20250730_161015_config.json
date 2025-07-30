@@ -1,0 +1,17 @@
+{
+  "model_type": "label_based",
+  "target_digit": 7,
+  "epochs": 2,
+  "batch_size": 512,
+  "fast_mode": true,
+  "val_subset_size": 500,
+  "hyper_opt_freq": 20,
+  "device": "cuda",
+  "train_samples": 60000,
+  "val_samples": 6265,
+  "model_params": 203530,
+  "hyper_params": 10,
+  "model_save_path": "checkpoints/label_based_7_20250730_161015_selector.pth",
+  "history_save_path": "checkpoints/label_based_7_20250730_161015_history.npz",
+  "log_file_path": "logs/training_log.txt"
+}
