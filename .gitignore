@@ -4,3 +4,4 @@ example/__pycache__/*
 example/MNIST/*
 example/FashionMNIST/
 .vscode/*
+data/
