@@ -92,7 +92,7 @@ class BaseHyperOptimizer():
         else:
             mvp = hessian_vector_product
         
-        p = self.solve(A=mvp, x=dval_dparam)   
+        p = self.solve(A=mvp, b=dval_dparam)   
         
         if self.stochastic:
             train_loss = - self.inner_lr * train_loss_fun()[0]
@@ -260,7 +260,11 @@ if __name__ == "__main__":
         parameters=list(model.net.parameters()),
         hyper_parameters=[model.hyper_param], 
         use_gauss_newton=False)
-    optimizer.step(train_loss, val_loss, train_logit, verbose=True)
+    
+    def train_loss_func():
+        return train_loss, train_logit
+    
+    optimizer.step(train_loss_func, val_loss, verbose=True)
     
     # conjugate case
     # optimizer = ConjugateHyperOptimizer(

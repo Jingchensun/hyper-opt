@@ -176,7 +176,7 @@ class DataSelectionHyperOptModel(BaseHyperOptModel):
         logit = self.network(x)
         
         # 计算每个样本的损失（不进行reduction）
-        losses = self.criterion(logit, y, reduction='none')
+        losses = self.criterion(logit, y)
         
         # 获取当前batch样本的权重
         current_weights = self.get_sample_weights()[sample_indices]
@@ -188,3 +188,12 @@ class DataSelectionHyperOptModel(BaseHyperOptModel):
         regularizer = self.regularizer()
         
         return weighted_loss + regularizer, logit
+    
+    def validation_loss(self, x, y):
+        """
+        计算验证损失（返回标量）
+        """
+        logit = self.network(x)
+        # 计算每个样本的损失，然后取平均
+        losses = self.criterion(logit, y)
+        return torch.mean(losses)
